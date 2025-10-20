@@ -1,0 +1,12 @@
+# See https://www.robotstxt.org/robotstxt.html for documentation on how to use the robots.txt file
+#
+# A simple example would be:
+# User-agent: *
+# Disallow: /cgi-bin/
+#
+# Most search engines will crawl your site even if you don't have a
+# robots.txt file. By creating this file you are telling them not to
+# crawl certain parts of your site.
+
+User-agent: *
+Disallow:

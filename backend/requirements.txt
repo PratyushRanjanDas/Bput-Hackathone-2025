@@ -1,0 +1,18 @@
+# Core ML & Data Libraries
+pandas
+numpy
+scikit-learn
+joblib
+
+# ONNX Conversion Libraries
+skl2onnx
+onnx
+onnxruntime
+
+# Flask Web Server Libraries
+Flask
+Flask-Cors
+
+# API Call & Environment Management
+requests
+python-dotenv
