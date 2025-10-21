@@ -54,7 +54,7 @@ function simulateNext24Hours(currentConditions) {
 
     simulatedData.push({
       temperature_celsius: simulatedTemp,
-      cloud_cover_percentage: simulatedCloudCover,
+      cloud_cover: simulatedCloudCover, // Changed from cloud_cover_percentage to cloud_cover
       panel_age_in_days: currentConditions.panel_age_in_days,
       days_since_cleaning: currentConditions.days_since_cleaning + Math.floor(i / 24),
       hour: hourOfDay, // Corrected feature name
@@ -121,7 +121,7 @@ export const generateOfflineRecommendation = async (currentConditions) => {
       if (hourData.hour >= 6 && hourData.hour <= 18) {
         const features = [
           hourData.temperature_celsius,
-          hourData.cloud_cover_percentage,
+          hourData.cloud_cover, // Changed from cloud_cover_percentage to cloud_cover
           hourData.panel_age_in_days,
           hourData.days_since_cleaning,
           hourData.hour,
@@ -232,7 +232,7 @@ export const generateOfflineHistory = async (panelAge, daysSinceCleaning, baseTe
       timestamp: hourTimestamp.toISOString(), // <-- The FIX: Add a valid ISO timestamp
       hour,
       temperature_celsius: temperature, // Match the key used by the online history
-      cloud_cover_percentage: cloud_cover, // Match the key used by the online history
+      cloud_cover: cloud_cover, // Changed from cloud_cover_percentage to cloud_cover
       predicted_loss_kw,
     });
   }

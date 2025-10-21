@@ -9,7 +9,6 @@ import {
   Title,
   Tooltip,
   Legend,
-  Filler, // <-- Import the Filler plugin
 } from 'chart.js';
 
 ChartJS.register(
@@ -19,8 +18,7 @@ ChartJS.register(
   LineElement,
   Title,
   Tooltip,
-  Legend,
-  Filler // <-- Register the Filler plugin
+  Legend
 );
 
 const HistoryGraph = ({ data }) => {
@@ -34,14 +32,14 @@ const HistoryGraph = ({ data }) => {
   }
 
   const chartData = {
-    labels: data.map(item => new Date(item.timestamp).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false })),
+    labels: data.map(item => new Date(item.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false })),
     datasets: [
       {
         label: 'Predicted Loss (kW)',
         data: data.map(item => item.predicted_loss_kw),
         borderColor: '#ff7300',
         backgroundColor: 'rgba(255, 115, 0, 0.2)',
-        fill: true,
+        fill: false,
         tension: 0.4,
         yAxisID: 'y',
       },
@@ -50,16 +48,16 @@ const HistoryGraph = ({ data }) => {
         data: data.map(item => item.temperature_celsius),
         borderColor: '#8884d8',
         backgroundColor: 'rgba(136, 132, 216, 0.1)',
-        fill: true,
+        fill: false,
         tension: 0.4,
         yAxisID: 'y1',
       },
       {
         label: 'Cloud Cover (%)',
-        data: data.map(item => item.cloud_cover_percentage),
+        data: data.map(item => (item.cloud_cover_percentage ?? item.cloud_cover)),
         borderColor: '#82ca9d',
         backgroundColor: 'rgba(130, 202, 157, 0.1)',
-        fill: true,
+        fill: false,
         tension: 0.4,
         yAxisID: 'y1',
       }
@@ -68,6 +66,7 @@ const HistoryGraph = ({ data }) => {
 
   const options = {
     responsive: true,
+    maintainAspectRatio: false, // Allow chart to fill container
     interaction: {
         mode: 'index',
         intersect: false,
@@ -82,12 +81,21 @@ const HistoryGraph = ({ data }) => {
       title: {
         display: true,
         text: '24-Hour Performance Analysis',
-        color: '#333'
+        color: '#333',
+        font: {
+            size: 18
+        }
       },
     },
     scales: {
         x: {
-            ticks: { color: '#333' },
+            ticks: { 
+              color: '#333',
+              maxRotation: 0,
+              minRotation: 0,
+              autoSkip: true,
+              maxTicksLimit: 12,
+            },
             grid: { color: 'rgba(0, 0, 0, 0.1)'}
         },
         y: {
@@ -122,7 +130,6 @@ const HistoryGraph = ({ data }) => {
 
   return (
     <>
-      <h3 className="history-header">24-Hour Performance Analysis</h3>
       <Line data={chartData} options={options} />
     </>
   );

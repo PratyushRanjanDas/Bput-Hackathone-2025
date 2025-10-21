@@ -37,7 +37,6 @@ def add_history_record():
         return jsonify({"error": f"Failed to save record: {e}"}), 500
 
 @api_blueprint.route('/recommend', methods=['POST'])
-# ... (the rest of the file is the same as before) ...
 def get_recommendation():
     """
     API endpoint to get a maintenance recommendation.

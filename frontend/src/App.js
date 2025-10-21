@@ -1,50 +1,66 @@
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
+import { BrowserRouter as Router, Routes, Route } from 'react-router-dom';
 import './App.css';
+import Navbar from './components/Navbar';
+import HomePage from './pages/HomePage';
+import LiveAnalysisPage from './pages/LiveAnalysisPage';
+import GraphPage from './pages/GraphPage';
+import HistoryPage from './pages/HistoryPage';
+import HardwareIntegrationPage from './pages/HardwareIntegrationPage';
 import { generateOfflineRecommendation, generateOfflineHistory } from './services/offlineRecommendationService';
-import HistoryGraph from './components/HistoryGraph';
 
 // --- Configuration ---
 const DEFAULT_LOCATION = { lat: 20.2961, lon: 85.8245 }; // Bhubaneswar
-const API_URL = 'http://127.0.0.1:5001';
+const API_URL = 'http://localhost:5001';
 const REFRESH_INTERVAL_MS = 60 * 1000;
 const DEBOUNCE_DELAY_MS = 500; // 0.5 second delay
-const LOCAL_STORAGE_KEY = 'solarOptimizerCache';
+const LOCAL_STORAGE_KEY_DATA = 'solarOptimizerData';
+const LOCAL_STORAGE_KEY_PARAMS = 'solarOptimizerParams';
 
 // --- LocalStorage Helper ---
 const getCachedData = () => {
   try {
-    const cached = localStorage.getItem(LOCAL_STORAGE_KEY);
-    if (cached) {
-      const { liveData, historyData, timestamp } = JSON.parse(cached);
-      // Cache is valid for 1 hour
-      if (Date.now() - timestamp < 3600 * 1000) {
-        return { liveData, historyData };
-      }
-    }
+    const cachedData = localStorage.getItem(LOCAL_STORAGE_KEY_DATA);
+    const cachedParams = localStorage.getItem(LOCAL_STORAGE_KEY_PARAMS);
+    
+    const liveData = cachedData ? JSON.parse(cachedData).liveData : null;
+    const historyData = cachedData ? JSON.parse(cachedData).historyData : null;
+    const params = cachedParams ? JSON.parse(cachedParams) : null;
+
+    return { liveData, historyData, params };
   } catch (error) {
     console.error("Failed to read from localStorage", error);
   }
-  return { liveData: null, historyData: null };
+  return { liveData: null, historyData: null, params: null };
 };
 
-const cacheData = (liveData, historyData) => {
+const cacheData = (liveData, historyData, params) => {
   try {
-    const dataToCache = {
-      liveData,
-      historyData,
-      timestamp: Date.now(),
-    };
-    localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(dataToCache));
+    const dataToCache = { liveData, historyData, timestamp: Date.now() };
+    localStorage.setItem(LOCAL_STORAGE_KEY_DATA, JSON.stringify(dataToCache));
+    localStorage.setItem(LOCAL_STORAGE_KEY_PARAMS, JSON.stringify(params));
   } catch (error) {
     console.error("Failed to write to localStorage", error);
   }
 };
 
+// --- Tilt Helpers (match backend heuristics) ---
+const seasonalOptimalTilt = (latitudeDeg, month) => {
+  const lat = Math.abs(latitudeDeg);
+  const optimal = (month >= 4 && month <= 9) ? (lat - 15) : (lat + 15);
+  return Math.min(90, Math.max(0, optimal));
+};
+
+const computeTiltPenaltyPct = (tiltAngle, optimalTilt) => {
+  const delta = Math.abs(tiltAngle - optimalTilt);
+  return Math.min(25, 0.6 * delta);
+};
+
 
 // --- API Helper Functions ---
-const fetchOnlineData = async (location, panelAge, daysSinceCleaning) => {
+const fetchOnlineData = async (location, panelAge, daysSinceCleaning, numPanels, idealPanelGeneration, tiltAngle) => {
   const { lat, lon } = location;
-  const queryParams = `?lat=${lat}&lon=${lon}&panel_age_in_days=${panelAge}&days_since_cleaning=${daysSinceCleaning}`;
+  const queryParams = `?lat=${lat}&lon=${lon}&panel_age_in_days=${panelAge}&days_since_cleaning=${daysSinceCleaning}&num_panels=${numPanels}&ideal_panel_generation_kw=${idealPanelGeneration}&tilt_angle=${tiltAngle}`;
   const response = await fetch(`${API_URL}/api/live_status${queryParams}`);
   if (!response.ok) {
     const errData = await response.json();
@@ -53,8 +69,10 @@ const fetchOnlineData = async (location, panelAge, daysSinceCleaning) => {
   return await response.json();
 };
 
-const fetchHistoryData = async (panelAge, daysSinceCleaning) => {
-  const queryParams = `?panel_age_in_days=${panelAge}&days_since_cleaning=${daysSinceCleaning}`;
+const fetchHistoryData = async (panelAge, daysSinceCleaning, numPanels, idealPanelGeneration, tiltAngle, location) => {
+  const lat = location?.lat ?? DEFAULT_LOCATION.lat;
+  const lon = location?.lon ?? DEFAULT_LOCATION.lon;
+  const queryParams = `?panel_age_in_days=${panelAge}&days_since_cleaning=${daysSinceCleaning}&num_panels=${numPanels}&ideal_panel_generation_kw=${idealPanelGeneration}&tilt_angle=${tiltAngle}&lat=${lat}&lon=${lon}`;
   const response = await fetch(`${API_URL}/api/history${queryParams}`);
   if (!response.ok) {
     throw new Error('Failed to fetch history data');
@@ -66,304 +84,244 @@ const fetchHistoryData = async (panelAge, daysSinceCleaning) => {
 function App() {
   const [liveData, setLiveData] = useState(null);
   const [historyData, setHistoryData] = useState(null);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
-  const [isOnline, setIsOnline] = useState(true);
   const [location, setLocation] = useState(DEFAULT_LOCATION);
-  const [isLocationLive, setIsLocationLive] = useState(false);
+  const [isOnline, setIsOnline] = useState(true); // Track online/offline mode
 
-  // State for user-editable parameters, initialized from cache or defaults
-  const [panelAge, setPanelAge] = useState(1095);
-  const [daysSinceCleaning, setDaysSinceCleaning] = useState(30);
-  const [offlineTemp, setOfflineTemp] = useState(28);
-  const [offlineCloud, setOfflineCloud] = useState(40);
-
-  // Debounced values for API calls in ONLINE mode
-  const [debouncedPanelAge, setDebouncedPanelAge] = useState(panelAge);
-  const [debouncedDaysSinceCleaning, setDebouncedDaysSinceCleaning] = useState(daysSinceCleaning);
+  // State for user-editable parameters
+  const [panelAge, setPanelAge] = useState('3');
+  const [dustDensity, setDustDensity] = useState('0.15'); // New state for dust density
+  const [numPanels, setNumPanels] = useState('10');
+  const [idealPanelGeneration, setIdealPanelGeneration] = useState('0.45');
+  const [tiltAngle, setTiltAngle] = useState('25');
+  
+  // Offline mode parameters (weather conditions when offline)
+  const [offlineTemp, setOfflineTemp] = useState(25);
+  const [offlineCloud, setOfflineCloud] = useState(20);
 
   // --- Effects ---
 
-  // Debounce effects for online parameters
+  // Get user's live location on initial load & load cached data
   useEffect(() => {
-    const handler = setTimeout(() => setDebouncedPanelAge(panelAge), DEBOUNCE_DELAY_MS);
-    return () => clearTimeout(handler);
-  }, [panelAge]);
+    const { liveData, historyData, params } = getCachedData();
+    if (liveData && historyData) {
+      setLiveData(liveData);
+      setHistoryData(historyData);
+    }
+    if (params) {
+      setPanelAge(params.panelAge || '3');
+      setDustDensity(params.dustDensity || '0.15');
+      setNumPanels(params.numPanels || '10');
+      setIdealPanelGeneration(params.idealPanelGeneration || '0.45');
+      setTiltAngle(params.tiltAngle || '25');
+    }
 
-  useEffect(() => {
-    const handler = setTimeout(() => setDebouncedDaysSinceCleaning(daysSinceCleaning), DEBOUNCE_DELAY_MS);
-    return () => clearTimeout(handler);
-  }, [daysSinceCleaning]);
-
-
-  // Get user's live location on initial load
-  useEffect(() => {
     navigator.geolocation?.getCurrentPosition(
       (position) => {
         const { latitude, longitude } = position.coords;
         setLocation({ lat: latitude, lon: longitude });
-        setIsLocationLive(true);
       },
-      () => setIsLocationLive(false)
+      (error) => {
+        console.log('Location access denied, using default location');
+      }
     );
   }, []);
 
   // --- Data Loading Logic ---
-
-  // 1. Function to load ONLINE data from the API
-  const loadOnlineData = useCallback(async () => {
-    if (!isOnline) return; // Safety check
-
+  const handleAnalyze = useCallback(async () => {
     setLoading(true);
     setError(null);
-    try {
-      const [live, history] = await Promise.all([
-        fetchOnlineData(location, debouncedPanelAge, debouncedDaysSinceCleaning),
-        fetchHistoryData(debouncedPanelAge, debouncedDaysSinceCleaning)
-      ]);
-      setLiveData(live);
-      setHistoryData(history);
-      cacheData(live, history); // Cache the successful online data
-      // Update offline defaults from live data
-      setOfflineTemp(live.live_weather.temperature_celsius);
-      setOfflineCloud(live.live_weather.cloud_cover_percentage);
-    } catch (e) {
-      console.error("Failed to load online data:", e);
-      setError(e.message);
-      setIsOnline(false); // Switch to offline on error
-    } finally {
-      setLoading(false);
+    
+    // Heuristic: Convert dust density (mg/m^3) to an effective "days since cleaning"
+    // This is a simple linear conversion for demonstration. A real model would be more complex.
+    // Assumes 0.01 mg/m^3 is 1 day and 0.5 mg/m^3 is ~30 days.
+    const effectiveDaysSinceCleaning = Math.max(1, Math.round(parseFloat(dustDensity) * 60));
+
+    const params = { panelAge, dustDensity, numPanels, idealPanelGeneration, tiltAngle };
+    const panelAgeInDays = Math.round(parseFloat(panelAge) * 365);
+    const daysClean = effectiveDaysSinceCleaning;
+    const panels = parseInt(numPanels);
+    const idealGen = parseFloat(idealPanelGeneration);
+
+    // Try online mode first
+    if (isOnline) {
+      try {
+        const [live, history] = await Promise.all([
+          fetchOnlineData(location, panelAgeInDays, daysClean, panels, idealGen, parseFloat(tiltAngle)),
+          fetchHistoryData(panelAgeInDays, daysClean, panels, idealGen, parseFloat(tiltAngle), location)
+        ]);
+        
+        setLiveData(live);
+        setHistoryData(history);
+        cacheData(live, history, params);
+        
+        // Update offline defaults from live weather data
+        if (live.live_weather) {
+          setOfflineTemp(live.live_weather.temperature_celsius);
+          setOfflineCloud(live.live_weather.cloud_cover_percentage || live.live_weather.cloud_cover);
+        }
+        
+        setLoading(false);
+        return;
+      } catch (e) {
+        console.error("Backend failed, switching to offline mode:", e);
+        setIsOnline(false);
+        setError('Backend unavailable - switching to offline mode');
+      }
     }
-  }, [isOnline, location, debouncedPanelAge, debouncedDaysSinceCleaning]);
-
-
-  // 2. Function to run the OFFLINE simulation
-  const runOfflineSimulation = async () => {
-    setLoading(true);
-    setError(null);
+    
+    // Offline mode
     try {
-      // This object now matches the parameter for generateOfflineRecommendation
       const currentConditions = {
-        panel_age_in_days: panelAge,
-        days_since_cleaning: daysSinceCleaning,
+        panel_age_in_days: panelAgeInDays,
+        days_since_cleaning: daysClean,
         temperature_celsius: offlineTemp,
         cloud_cover_percentage: offlineCloud,
       };
 
-      // Await both promises together for efficiency
       const [offlineLive, offlineHistory] = await Promise.all([
         generateOfflineRecommendation(currentConditions),
-        generateOfflineHistory(panelAge, daysSinceCleaning, offlineTemp, offlineCloud)
+        generateOfflineHistory(panelAgeInDays, daysClean, offlineTemp, offlineCloud)
       ]);
 
-      // The live data for the card needs to match the online structure
-      setLiveData({
-        live_status: offlineLive,
+      // Calculate total system loss for offline mode
+      const singlePanelLoss = offlineLive.predicted_loss_kw || 0;
+      const totalSystemLoss = singlePanelLoss * panels;
+      const idealOutput = idealGen * panels;
+
+      // Tilt penalty in offline mode
+      const now = new Date();
+      const month = now.getMonth() + 1;
+      const optimalTilt = seasonalOptimalTilt(location.lat ?? DEFAULT_LOCATION.lat, month);
+      const tiltPenaltyPct = computeTiltPenaltyPct(parseFloat(tiltAngle), optimalTilt);
+      const tiltLossKw = (tiltPenaltyPct / 100) * idealOutput;
+
+      const combinedTotalLoss = totalSystemLoss + tiltLossKw;
+      const energyDepreciation = idealOutput > 0 ? (combinedTotalLoss / idealOutput) * 100 : 0;
+
+      // Format data to match online structure
+      const offlineLiveData = {
+        live_status: {
+          predicted_hourly_loss_kw: singlePanelLoss,
+          total_system_loss_kw: combinedTotalLoss,
+          action_required: offlineLive.action_required,
+          recommendation_message: offlineLive.recommendation_message,
+          estimated_daily_financial_loss: combinedTotalLoss * 24 * 8, // Assuming ₹8/kWh
+          energy_depreciation_percentage: energyDepreciation,
+          dust_level_days: daysClean,
+          tilt_angle_deg: parseFloat(tiltAngle),
+          optimal_tilt_angle_deg: Math.round(optimalTilt * 10) / 10,
+          tilt_penalty_percentage: Math.round(tiltPenaltyPct * 100) / 100,
+          tilt_loss_kw: Math.round(tiltLossKw * 10000) / 10000,
+        },
         live_weather: {
           temperature_celsius: offlineTemp,
           cloud_cover_percentage: offlineCloud,
+          cloud_cover: offlineCloud,
+          uv_index: 0, // Not available in offline mode
         }
-      });
+      };
+      setLiveData(offlineLiveData);
       setHistoryData(offlineHistory);
-
+      cacheData(offlineLiveData, offlineHistory, params);
     } catch (e) {
-      console.error("Failed to run offline simulation:", e);
-      setError(e.message);
+      console.error("Offline mode failed:", e);
+      setError(`Offline analysis failed: ${e.message}`);
     } finally {
       setLoading(false);
     }
-  };
+  }, [isOnline, location, panelAge, dustDensity, numPanels, idealPanelGeneration, tiltAngle, offlineTemp, offlineCloud]);
 
-  // 3. Effect for INITIAL load and handling mode switches
   useEffect(() => {
-    const { liveData: cachedLive, historyData: cachedHistory } = getCachedData();
-    if (cachedLive && cachedHistory) {
-      setLiveData(cachedLive);
-      setHistoryData(cachedHistory);
-      setOfflineTemp(cachedLive.live_weather.temperature_celsius);
-      setOfflineCloud(cachedLive.live_weather.cloud_cover_percentage);
-      setLoading(false);
-    } else if (isOnline) {
-      // If no cache, and we are online, load fresh data.
-      loadOnlineData();
-    } else {
-      // If no cache and we start offline, just stop loading.
-      setLoading(false);
-    }
-  }, []); // Runs only ONCE on initial mount
+    const checkBackendStatus = async () => {
+      if (!navigator.onLine) {
+        setIsOnline(false);
+        return;
+      }
+      try {
+        const response = await fetch(`${API_URL}/api/health`);
+        if (response.ok) {
+          const lastStatus = isOnline;
+          if (!lastStatus) {
+            // If we just came back online, restore last saved data
+            const { liveData, historyData } = getCachedData();
+            if (liveData && historyData) {
+              setLiveData(liveData);
+              setHistoryData(historyData);
+              setError('Backend is back online. Restored last analysis.');
+            } else {
+              setError('Backend is online.');
+            }
+          }
+          setIsOnline(true);
+        } else {
+          setIsOnline(false);
+        }
+      } catch (error) {
+        setIsOnline(false);
+      }
+    };
 
-  // 4. Effect for ONLINE data fetching (and background refresh)
-  useEffect(() => {
-    if (!isOnline) return;
+    checkBackendStatus(); // Initial check on load
+    const intervalId = setInterval(checkBackendStatus, 15000); // Check every 15 seconds
 
-    // Fetch data immediately when dependencies change
-    loadOnlineData();
-
-    // Set up the interval for background refresh
-    const intervalId = setInterval(loadOnlineData, REFRESH_INTERVAL_MS);
-
-    // Cleanup interval on unmount or when dependencies change
-    return () => clearInterval(intervalId);
-
-  }, [isOnline, location, debouncedPanelAge, debouncedDaysSinceCleaning]); // Re-runs when these change
-
-
-  const getRecommendationCardClassName = () => {
-    if (error) return 'recommendation-card error';
-    if (!liveData) return 'recommendation-card';
-    const actionRequired = isOnline ? liveData.action_required : liveData.live_status?.action_required;
-    return `recommendation-card ${actionRequired ? 'action-needed' : ''}`;
-  };
-
-  const renderContent = () => {
-    if (loading && !liveData) { // Only show full loading screen on initial load
-      return (
-        <div className="loading-container">
-          <div className="loading-spinner"></div>
-          <p>{isOnline ? 'Fetching live data...' : 'Running offline simulation...'}</p>
-        </div>
-      );
-    }
-    if (error) {
-      return (
-        <div className={getRecommendationCardClassName()}>
-          <div className="card-header"><h3>{isOnline ? 'Connection Error' : 'Offline Error'}</h3></div>
-          <div className="card-content">
-            <p className="recommendation-message">{error}</p>
-            <p>Please ensure the backend server is running and check the browser console for more details.</p>
-          </div>
-        </div>
-      );
-    }
-
-    if (liveData && liveData.live_weather) {
-      const recommendation = isOnline ? liveData.recommendation_message : liveData.live_status?.recommendation_message;
-      const loss = isOnline ? liveData.predicted_loss_kw : liveData.live_status?.predicted_loss_kw;
-
-      return (
-        <>
-          <div className={getRecommendationCardClassName()}>
-            <div className="card-header">
-              <h3>{isOnline ? 'Live Analysis' : 'Offline Simulation'} & Recommendation</h3>
-            </div>
-            <div className="card-content">
-              <p className="recommendation-message">{recommendation}</p>
-              <div className="details">
-                <div className="detail-item">
-                  <span className="detail-label">Temperature</span>
-                  <span className="detail-value">{liveData.live_weather.temperature_celsius?.toFixed(1)} °C</span>
-                </div>
-                <div className="detail-item">
-                  <span className="detail-label">Cloud Cover</span>
-                  <span className="detail-value">{liveData.live_weather.cloud_cover_percentage} %</span>
-                </div>
-                <div className="detail-item">
-                  <span className="detail-label">Predicted Loss</span>
-                  <span className="detail-value">{loss?.toFixed(4)} kW</span>
-                </div>
-              </div>
-            </div>
-          </div>
-          {historyData && (
-            <div className="history-card">
-              <HistoryGraph data={historyData} />
-            </div>
-          )}
-        </>
-      );
-    }
-    // Fallback content when not loading, no error, and no data yet
-    return (
-      <div className="recommendation-card">
-        <div className="card-header"><h3>{isOnline ? 'Live Analysis' : 'Offline Simulation'}</h3></div>
-        <div className="card-content">
-          <p className="recommendation-message">
-            {isOnline ? 'Ready to fetch live data.' : 'Set parameters and click "Run Simulation" to begin.'}
-          </p>
-        </div>
-      </div>
-    );
-  };
+    return () => clearInterval(intervalId); // Cleanup on component unmount
+  }, [isOnline]);
 
   return (
-    <div className="App">
-      <header className="App-header">
-        <h1>Solar Panel Optimizer</h1>
-        <div className="header-controls">
-          {isLocationLive && (
-            <span className="location-indicator live">
-              ● Live Location
-            </span>
-          )}
-          <button
-            className={`status-indicator ${isOnline && !error ? 'online' : 'offline'}`}
-            onClick={() => setIsOnline(!isOnline)}
-          >
-            {isOnline && !error ? 'Online Mode' : 'Offline Mode'}
-          </button>
-        </div>
-      </header>
-      <main className="main-content">
-        <div className="settings-card">
-          <div className="card-header">
-            <h3>System Parameters</h3>
-          </div>
-          <div className="card-content">
-            <div className="details">
-              <div className="detail-item">
-                <label htmlFor="panelAge" className="detail-label">Panel Age (days)</label>
-                <input
-                  type="number"
-                  id="panelAge"
-                  className="detail-input"
-                  value={panelAge}
-                  onChange={(e) => setPanelAge(parseInt(e.target.value, 10))}
-                />
-              </div>
-              <div className="detail-item">
-                <label htmlFor="daysSinceCleaning" className="detail-label">Days Since Last Cleaning</label>
-                <input
-                  type="number"
-                  id="daysSinceCleaning"
-                  className="detail-input"
-                  value={daysSinceCleaning}
-                  onChange={(e) => setDaysSinceCleaning(parseInt(e.target.value, 10))}
-                />
-              </div>
-              <div className="detail-item">
-                <label htmlFor="offlineTemp" className="detail-label">Temperature (°C)</label>
-                <input
-                  type="number"
-                  id="offlineTemp"
-                  step="0.1"
-                  className="detail-input"
-                  value={offlineTemp}
-                  onChange={(e) => setOfflineTemp(parseFloat(e.target.value))}
-                  disabled={isOnline}
-                />
-              </div>
-              <div className="detail-item">
-                <label htmlFor="offlineCloud" className="detail-label">Cloud Cover (%)</label>
-                <input
-                  type="number"
-                  id="offlineCloud"
-                  className="detail-input"
-                  value={offlineCloud}
-                  onChange={(e) => setOfflineCloud(parseInt(e.target.value, 10))}
-                  disabled={isOnline}
-                />
-              </div>
-            </div>
-            {!isOnline && (
-              <button className="simulate-button" onClick={runOfflineSimulation} disabled={loading}>
-                {loading ? 'Simulating...' : 'Run Simulation'}
-              </button>
-            )}
-          </div>
-        </div>
-        {renderContent()}
-      </main>
-    </div>
+    <Router>
+      <div className="App">
+        <Navbar isOnline={isOnline} />
+        <Routes>
+                    <Route 
+            path="/" 
+            element={
+              <HomePage 
+                panelAge={panelAge}
+                setPanelAge={setPanelAge}
+                dustDensity={dustDensity}
+                setDustDensity={setDustDensity}
+                numPanels={numPanels}
+                setNumPanels={setNumPanels}
+                idealPanelGeneration={idealPanelGeneration}
+                setIdealPanelGeneration={setIdealPanelGeneration}
+                tiltAngle={tiltAngle}
+                setTiltAngle={setTiltAngle}
+                onAnalyze={handleAnalyze}
+                isLoading={loading}
+                error={error}
+              />
+            } 
+          />
+//...
+          <Route 
+            path="/hardware"
+            element={<HardwareIntegrationPage dustDensity={dustDensity} setDustDensity={setDustDensity} />}
+          />
+          <Route 
+            path="/live-analysis" 
+            element={<LiveAnalysisPage liveData={liveData} />} 
+          />
+          <Route 
+            path="/graph" 
+            element={<GraphPage historyData={historyData} />} 
+          />
+          <Route 
+            path="/history" 
+            element={<HistoryPage historyData={historyData} />} 
+          />
+          <Route 
+            path="/hardware-integration" 
+            element={<HardwareIntegrationPage />} 
+          />
+          <Route 
+            path="/hardware"
+            element={<HardwareIntegrationPage />}
+          />
+        </Routes>
+      </div>
+    </Router>
   );
 }
 

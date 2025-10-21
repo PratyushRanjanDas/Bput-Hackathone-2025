@@ -1,0 +1,142 @@
+.hardware-page {
+    padding: 2rem;
+    max-width: 1200px;
+    margin: 0 auto;
+    min-height: calc(100vh - 80px);
+    background: #f4f7f6;
+}
+
+.page-header {
+    text-align: center;
+    margin-bottom: 2rem;
+}
+
+.page-header h1 {
+    color: #2c3e50;
+    font-size: 2.5rem;
+}
+
+.page-header p {
+    color: #7f8c8d;
+    font-size: 1.1rem;
+}
+
+.hardware-container {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 2rem;
+}
+
+.connection-controls,
+.data-display,
+.explanation-box {
+    background: white;
+    padding: 2rem;
+    border-radius: 12px;
+    box-shadow: 0 4px 15px rgba(0, 0, 0, 0.08);
+}
+
+.connection-controls h2,
+.data-display h2,
+.explanation-box h3 {
+    color: #34495e;
+    margin-top: 0;
+    margin-bottom: 1rem;
+    border-bottom: 2px solid #ecf0f1;
+    padding-bottom: 0.5rem;
+}
+
+.status-connected {
+    color: #27ae60;
+}
+
+.status-disconnected {
+    color: #c0392b;
+}
+
+.status-message {
+    font-style: italic;
+    color: #7f8c8d;
+    min-height: 20px;
+}
+
+.connect-btn,
+.disconnect-btn {
+    padding: 12px 24px;
+    border: none;
+    border-radius: 8px;
+    font-size: 1rem;
+    font-weight: bold;
+    cursor: pointer;
+    transition: all 0.3s ease;
+}
+
+.connect-btn {
+    background-color: #3498db;
+    color: white;
+}
+
+.connect-btn:disabled {
+    background-color: #bdc3c7;
+    cursor: not-allowed;
+}
+
+.connect-btn:hover:not(:disabled) {
+    background-color: #2980b9;
+}
+
+.disconnect-btn {
+    background-color: #e74c3c;
+    color: white;
+}
+
+.disconnect-btn:hover {
+    background-color: #c0392b;
+}
+
+.density-value-wrapper {
+    display: flex;
+    align-items: baseline;
+    justify-content: center;
+    background: #ecf0f1;
+    padding: 2rem;
+    border-radius: 8px;
+    text-align: center;
+}
+
+.density-value {
+    font-size: 4rem;
+    font-weight: bold;
+    color: #2c3e50;
+}
+
+.density-value-placeholder {
+    font-size: 4rem;
+    font-weight: bold;
+    color: #bdc3c7;
+}
+
+.density-unit {
+    font-size: 1.5rem;
+    color: #7f8c8d;
+    margin-left: 0.5rem;
+}
+
+.data-description {
+    text-align: center;
+    color: #95a5a6;
+    margin-top: 1rem;
+}
+
+.explanation-box ol {
+    padding-left: 20px;
+}
+
+.explanation-box li {
+    margin-bottom: 1rem;
+    line-height: 1.6;
+}
+
+.explanation-box strong {
+    color: #2980b9;
+}

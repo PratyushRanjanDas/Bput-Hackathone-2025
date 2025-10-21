@@ -138,7 +138,6 @@ cython_debug/
 # Custom
 /backend/data/historical_solar_data.csv
 /backend/data/historical_loss_data.csv
-/backend/ml_training/saved_model/loss_prediction_model.pkl
 # Keep the ONNX model for the frontend
 # /backend/ml_training/saved_model/loss_prediction_model.onnx
 /backend/data/history.db
