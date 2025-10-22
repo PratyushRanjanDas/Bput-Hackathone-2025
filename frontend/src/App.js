@@ -219,9 +219,9 @@ function App() {
           fetchHistoryData(panelAgeInDays, daysClean, panels, idealGen, parseFloat(tiltAngle), location)
         ]);
         
-  setLiveData(live);
-  setHistoryData(history);
-  cacheData(live, history, paramsToCache);
+        setLiveData(live);
+        setHistoryData(history);
+        cacheData(live, history, paramsToCache);
         
         // Update offline defaults from live weather data
         if (live.live_weather) {
@@ -260,49 +260,52 @@ function App() {
         generateOfflineHistory(panelAgeInDays, daysClean, offlineTemp, offlineCloud)
       ]);
 
-      // Use offline service's aggregated daily values when available
-      const singlePanelLossKw = offlineLive.predicted_loss_kw || 0; // instantaneous peak if needed
-      const predicted_daily_loss_kwh_per_panel = offlineLive.predicted_daily_loss_kwh_per_panel ?? Math.round(singlePanelLossKw * 24 * 10000) / 10000;
-      const total_system_daily_loss_kwh = offlineLive.total_system_daily_loss_kwh ?? Math.round((predicted_daily_loss_kwh_per_panel * panels) * 10000) / 10000;
+      const singlePanelLossKw = offlineLive.predicted_loss_kw || 0;
 
-      // For percent-based depreciation, prefer the offline-provided value if present
-  // Compute or prefer offline-provided energy depreciation percentage. If we fallback to computing it,
-  // use the defensively computed idealDailyPerPanelFromInput (kWh/day per panel).
-  const idealTotalDailyKwh = idealDailyPerPanelFromInput * panels;
-  let energyDepreciation = offlineLive.energy_depreciation_percentage ?? (idealTotalDailyKwh > 0 ? (total_system_daily_loss_kwh / idealTotalDailyKwh * 100) : 0);
+      // --- START: CORRECTED OFFLINE CALCULATION LOGIC ---
 
-  // Clamp percent to sensible range [0, 100]. Keep internal value for recommendation semantics.
-  energyDepreciation = Math.max(0, Math.min(100, energyDepreciation));
-
-      // Tilt penalty in offline mode (instantaneous kW approximation)
+      // 1. Calculate Tilt Penalty
       const now = new Date();
       const month = now.getMonth() + 1;
       const optimalTilt = seasonalOptimalTilt(location.lat ?? DEFAULT_LOCATION.lat, month);
       const tiltPenaltyPct = computeTiltPenaltyPct(parseFloat(tiltAngle), optimalTilt);
       const tiltLossKw = (tiltPenaltyPct / 100) * (idealGen * panels);
+      const tilt_loss_kwh_per_day = Math.round((tiltLossKw * 24) * 10000) / 10000;
+
+      // 2. Get base system loss from offline service
+      const predicted_daily_loss_kwh_per_panel_base = offlineLive.predicted_daily_loss_kwh_per_panel ?? Math.round(singlePanelLossKw * 24 * 10000) / 10000;
+      const base_system_daily_loss_kwh = offlineLive.total_system_daily_loss_kwh ?? Math.round((predicted_daily_loss_kwh_per_panel_base * panels) * 10000) / 10000;
+
+      // 3. Combine base loss and tilt loss to get total uncapped loss
+      let total_system_daily_loss_with_tilt = Math.round((base_system_daily_loss_kwh + tilt_loss_kwh_per_day) * 10000) / 10000;
+
+      // 4. Calculate the ideal total daily generation
+      const idealTotalDailyKwh = idealDailyPerPanelFromInput * panels;
+
+      // 5. CRITICAL: Cap the total loss at the ideal generation to prevent impossible values
+      total_system_daily_loss_with_tilt = Math.min(total_system_daily_loss_with_tilt, idealTotalDailyKwh);
+
+      // 6. NOW, calculate the final energy depreciation percentage from the capped total
+      let energyDepreciation = (idealTotalDailyKwh > 0) 
+          ? (total_system_daily_loss_with_tilt / idealTotalDailyKwh * 100) 
+          : 0;
+      energyDepreciation = Math.max(0, Math.min(100, energyDepreciation)); // Clamp to [0, 100]
+
+      // 7. Ensure the per-panel loss shown in the UI is consistent with the final capped total
+      const final_predicted_daily_loss_kwh_per_panel = total_system_daily_loss_with_tilt / panels;
+
+      // --- END: CORRECTED OFFLINE CALCULATION LOGIC ---
 
       const combinedTotalLossKw = (singlePanelLossKw * panels) + tiltLossKw;
 
-      // Build percent-based recommendation messages (use energy_depreciation_percentage as the single source of truth)
-      const MODERATE_PCT = 5; // percent
-      const HIGH_PCT = 10; // percent (notifications / action threshold)
-      const CRITICAL_PCT = 20; // percent
+      // Build percent-based recommendation messages using the corrected energyDepreciation
+      const MODERATE_PCT = 5;
+      const HIGH_PCT = 10;
+      const CRITICAL_PCT = 20;
 
       let action_required = false;
       let recommendation_message = 'No immediate action required. System performing within expected parameters.';
 
-      // Note: build recommendation message after computing total_system_daily_loss_with_tilt
-
-      // Format data to match online structure (include daily kWh fields so frontend components can read them)
-      // tiltLossKw is instantaneous kW; convert tilt loss to kWh/day when computing totals
-      const tilt_loss_kwh_per_day = Math.round((tiltLossKw * 24) * 10000) / 10000;
-      let total_system_daily_loss_with_tilt = Math.round((total_system_daily_loss_kwh + tilt_loss_kwh_per_day) * 10000) / 10000;
-      // Cap displayed total daily loss at the ideal total daily production to avoid showing impossible losses
-      if (total_system_daily_loss_with_tilt > idealTotalDailyKwh) {
-        total_system_daily_loss_with_tilt = Math.round(idealTotalDailyKwh * 10000) / 10000;
-      }
-
-      // Build percent-based recommendation messages (use energy_depreciation_percentage as the single source of truth)
       if (energyDepreciation >= CRITICAL_PCT) {
         action_required = true;
         recommendation_message = `CRITICAL: Immediate action required. Estimated energy depreciation is ${energyDepreciation.toFixed(1)}% (${total_system_daily_loss_with_tilt.toFixed(2)} kWh/day system loss). Schedule immediate cleaning and inspection.`;
@@ -313,16 +316,17 @@ function App() {
         recommendation_message = `Moderate Priority: Estimated energy depreciation is ${energyDepreciation.toFixed(1)}% (${total_system_daily_loss_with_tilt.toFixed(2)} kWh/day system loss). Plan to clean panels in the near future.`;
       }
 
-      // Debug logs to help trace why values are zero in UI
+      // Debug logs to help trace values
       try {
         console.debug('offlineLive (raw):', offlineLive);
-        console.debug('computed: singlePanelLossKw=', singlePanelLossKw, 'predicted_daily_loss_kwh_per_panel=', predicted_daily_loss_kwh_per_panel, 'total_system_daily_loss_kwh=', total_system_daily_loss_kwh, 'tilt_loss_kwh_per_day=', tilt_loss_kwh_per_day, 'total_with_tilt=', total_system_daily_loss_with_tilt, 'idealTotalDailyKwh=', idealTotalDailyKwh, 'energyDepreciation=', energyDepreciation);
+        console.debug('computed: total_with_tilt=', total_system_daily_loss_with_tilt, 'idealTotalDailyKwh=', idealTotalDailyKwh, 'energyDepreciation=', energyDepreciation);
       } catch (e) {}
 
+      // Build the final liveData object with the corrected values
       const offlineLiveData = {
         live_status: {
           predicted_hourly_loss_kw: singlePanelLossKw,
-          predicted_daily_loss_kwh_per_panel: predicted_daily_loss_kwh_per_panel,
+          predicted_daily_loss_kwh_per_panel: final_predicted_daily_loss_kwh_per_panel,
           total_system_daily_loss_kwh: total_system_daily_loss_with_tilt,
           total_system_loss_kw: combinedTotalLossKw,
           action_required: action_required,
@@ -340,7 +344,6 @@ function App() {
           temperature_celsius: offlineTemp,
           cloud_cover_percentage: offlineCloud,
           cloud_cover: offlineCloud,
-          // Simple diurnal UV index estimate for offline mode: peaks at ~noon, zero at night
           uv_index: (() => {
             try {
               const h = new Date().getHours();
@@ -355,8 +358,6 @@ function App() {
 
       setLiveData(offlineLiveData);
       setHistoryData(offlineHistory);
-      cacheData(offlineLiveData, offlineHistory, params);
-      // ensure lastCleanDate is also saved for offline path
       cacheData(offlineLiveData, offlineHistory, paramsToCache);
     } catch (e) {
       console.error("Offline mode failed:", e);
@@ -377,7 +378,6 @@ function App() {
         if (response.ok) {
           const lastStatus = isOnline;
           if (!lastStatus) {
-            // If we just came back online, restore last saved data
             const { liveData, historyData } = getCachedData();
             if (liveData && historyData) {
               setLiveData(liveData);
@@ -429,7 +429,6 @@ function App() {
               />
             } 
           />
-//...
           <Route 
             path="/hardware"
             element={<HardwareIntegrationPage dustDensity={dustDensity} setDustDensity={setDustDensity} />}

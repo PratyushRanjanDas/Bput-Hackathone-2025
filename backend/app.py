@@ -1,6 +1,6 @@
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-import joblib
+import onnxruntime as ort
 import numpy as np
 import pandas as pd
 import datetime
@@ -52,13 +52,13 @@ def create_app():
     # --- Model Loading ---
     script_dir = os.path.dirname(os.path.abspath(__file__))
     model_path = os.path.join(
-        script_dir, 'ml_training', 'saved_model', 'loss_prediction_model.pkl')
+        script_dir, 'ml_training', 'saved_model', 'loss_prediction_model.onnx')
     try:
-        model = joblib.load(model_path)
-        print(f"Model loaded successfully from {model_path}")
-    except FileNotFoundError:
-        print(f"Error: Model file not found at '{model_path}'")
-        model = None
+        ort_session = ort.InferenceSession(model_path)
+        print(f"ONNX model loaded successfully from {model_path}")
+    except Exception as e:
+        print(f"Error loading ONNX model: {e}")
+        ort_session = None
 
     # --- Helper Functions ---
     def get_live_weather(lat, lon):
@@ -292,8 +292,8 @@ def create_app():
     @app.route('/api/live_status', methods=['GET'])
     def live_status():
         # Clean, consistent implementation for live_status
-        if not model:
-            return jsonify({"error": "Model is not loaded on the server."}), 500
+        if not ort_session:
+            return jsonify({"error": "ONNX model is not loaded on the server."}), 500
 
         # Parse query params
         try:
@@ -316,22 +316,21 @@ def create_app():
         day_of_year = now.timetuple().tm_yday
         month = now.month
 
-        # Prepare feature vector for model (match FEATURE_NAMES)
-        features_df = pd.DataFrame([[
+        # Prepare feature vector for ONNX model (match FEATURE_NAMES)
+        input_features = np.array([[
             weather['temperature_celsius'],
             weather['cloud_cover_percentage'],
             panel_age_in_days,
             days_since_cleaning,
             hour,
             day_of_year
-        ]], columns=FEATURE_NAMES)
-
-        # Model output: instantaneous kW loss per panel (expected). Apply defensive clipping.
+        ]], dtype=np.float32)
         try:
-            raw_pred_system_kw = float(model.predict(features_df)[0])
+            ort_inputs = {ort_session.get_inputs()[0].name: input_features}
+            raw_pred_system_kw = float(ort_session.run(None, ort_inputs)[0][0][0])
         except Exception as e:
-            app.logger.exception('Model prediction failed')
-            return jsonify({"error": "Model prediction error"}), 500
+            app.logger.exception('ONNX model prediction failed')
+            return jsonify({"error": "ONNX model prediction error"}), 500
         # Determine allowed range: give a small buffer but prevent implausible spikes
         ideal_total_generation_kw = ideal_panel_generation_kw * num_panels
         max_allowed_system = max(ideal_total_generation_kw * 2.0, 50.0)  # allow up to 2x ideal or 50 kW hard cap
@@ -347,10 +346,17 @@ def create_app():
             delta_days = int(request.args.get('monotonicity_check_days', 7))
         except Exception:
             delta_days = 7
-        features_df_more = features_df.copy()
-        features_df_more.loc[:, 'days_since_cleaning'] = features_df_more.loc[:, 'days_since_cleaning'] + delta_days
+        input_features_more = np.array([[
+            weather['temperature_celsius'],
+            weather['cloud_cover_percentage'],
+            panel_age_in_days,
+            days_since_cleaning + delta_days,
+            hour,
+            day_of_year
+        ]], dtype=np.float32)
         try:
-            predicted_more_per_panel = float(model.predict(features_df_more)[0])
+            ort_inputs_more = {ort_session.get_inputs()[0].name: input_features_more}
+            predicted_more_per_panel = float(ort_session.run(None, ort_inputs_more)[0][0][0])
         except Exception:
             predicted_more_per_panel = predicted_loss_per_panel_kw
 
@@ -384,22 +390,15 @@ def create_app():
             app.logger.warning('Capping total_system_daily_loss_kwh: computed=%s ideal=%s', total_system_daily_loss_kwh, ideal_total_daily_kwh)
             total_system_daily_loss_kwh = ideal_total_daily_kwh
 
-        # After capping the daily loss to ideal, recompute instantaneous and percentage
-        # so UI fields are consistent (avoid showing per-panel > total/num_panels or pct>displayed).
-        # combined_total_loss_kw will be derived from the capped daily value.
-        combined_total_loss_kw = total_system_daily_loss_kwh / 24.0
-
-        # Recompute energy depreciation percentage using the capped daily totals
+        # Always compute percentage and per-panel from capped daily loss
         if ideal_total_daily_kwh > 0:
             energy_depreciation_percentage = (total_system_daily_loss_kwh / ideal_total_daily_kwh) * 100.0
             energy_depreciation_percentage = max(0.0, min(100.0, energy_depreciation_percentage))
         else:
             energy_depreciation_percentage = 0.0
 
-        # Ensure per-panel daily prediction matches the capped total (so UI is self-consistent)
         predicted_daily_loss_kwh_per_panel = total_system_daily_loss_kwh / max(1, int(num_panels))
-
-        # Recompute actual generation instantaneous KW after using the capped loss
+        combined_total_loss_kw = total_system_daily_loss_kwh / 24.0
         actual_generation_kw = max(0.0, total_ideal_generation_kw - combined_total_loss_kw)
 
         estimated_daily_financial_loss = total_system_daily_loss_kwh * 8.0
@@ -447,8 +446,8 @@ def create_app():
     @app.route('/api/history', methods=['GET'])
     def get_history():
         try:
-            if not model:
-                return jsonify({"error": "Model is not loaded on the server."}), 500
+            if not ort_session:
+                return jsonify({"error": "ONNX model is not loaded on the server."}), 500
             try:
                 panel_age_in_days = int(request.args.get('panel_age_in_days'))
                 days_since_cleaning = int(request.args.get('days_since_cleaning'))
@@ -480,15 +479,19 @@ def create_app():
                 soiling_ok = False
                 reported_soiling_loss = 0.0
                 if 6 <= hour <= 18:
-                    features_df = pd.DataFrame(
-                        [[sim_temp, sim_clouds, panel_age_in_days, days_since_cleaning, hour, day_of_year]], columns=FEATURE_NAMES)
-                    predicted_loss_per_panel = model.predict(features_df)[0]
+                    input_features_hist = np.array([[
+                        sim_temp, sim_clouds, panel_age_in_days, days_since_cleaning, hour, day_of_year
+                    ]], dtype=np.float32)
+                    ort_inputs_hist = {ort_session.get_inputs()[0].name: input_features_hist}
+                    predicted_loss_per_panel = float(ort_session.run(None, ort_inputs_hist)[0][0][0])
 
                     # Soiling monotonicity check for this simulated hour
                     try:
-                        df_more = features_df.copy()
-                        df_more.loc[:, 'days_since_cleaning'] = df_more.loc[:, 'days_since_cleaning'] + 7
-                        predicted_more = float(model.predict(df_more)[0])
+                        input_features_more_hist = np.array([[
+                            sim_temp, sim_clouds, panel_age_in_days, days_since_cleaning + 7, hour, day_of_year
+                        ]], dtype=np.float32)
+                        ort_inputs_more_hist = {ort_session.get_inputs()[0].name: input_features_more_hist}
+                        predicted_more = float(ort_session.run(None, ort_inputs_more_hist)[0][0][0])
                     except Exception:
                         predicted_more = predicted_loss_per_panel
                     soiling_ok = (predicted_more - predicted_loss_per_panel) > 0.0001
