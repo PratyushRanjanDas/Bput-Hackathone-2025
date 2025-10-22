@@ -16,3 +16,4 @@ Flask-Cors
 # API Call & Environment Management
 requests
 python-dotenv
+pywebpush

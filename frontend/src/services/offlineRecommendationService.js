@@ -85,6 +85,7 @@ const runPrediction = async (temperature, cloud_cover, panel_age_in_days, days_s
     let action_required = false;
     let recommendation_message = 'System is operating normally. No immediate action required.';
 
+    // Keep existing kW thresholds for legacy logic, but also provide percent-based guidance via energy depreciation below.
     if (predicted_loss_kw >= HIGH_LOSS_THRESHOLD_KW) {
       action_required = true;
       recommendation_message = `High energy loss detected (${predicted_loss_kw.toFixed(2)} kW). Immediate panel cleaning is recommended to restore efficiency.`;
@@ -114,90 +115,122 @@ export const generateOfflineRecommendation = async (currentConditions) => {
 
   try {
     const simulatedHours = simulateNext24Hours(currentConditions);
+
+    // Run predictions for each hour and aggregate hourly kW losses to daily kWh per panel
+    const hourly_losses_kw = [];
     let peak_loss_kw = 0;
 
-    // Loop through each simulated hour to find the peak loss during daylight
     for (const hourData of simulatedHours) {
+      // Only consider daylight hours where production occurs (6-18 local hour)
       if (hourData.hour >= 6 && hourData.hour <= 18) {
         const features = [
           hourData.temperature_celsius,
-          hourData.cloud_cover, // Changed from cloud_cover_percentage to cloud_cover
+          hourData.cloud_cover,
           hourData.panel_age_in_days,
           hourData.days_since_cleaning,
           hourData.hour,
           hourData.day_of_year,
         ];
-        
+
         const inputTensor = new Tensor('float32', features, [1, 6]);
         const feeds = { float_input: inputTensor };
         const results = await modelSession.run(feeds);
         const predicted_hourly_loss_kw = results.variable.data[0];
-        
-        if (predicted_hourly_loss_kw > peak_loss_kw) {
-          peak_loss_kw = predicted_hourly_loss_kw;
-        }
+
+        hourly_losses_kw.push(predicted_hourly_loss_kw);
+        if (predicted_hourly_loss_kw > peak_loss_kw) peak_loss_kw = predicted_hourly_loss_kw;
       }
     }
 
-    // --- Tiered Recommendation Logic (mirrors backend) ---
-    const recommendations = [];
-    let action_required = false;
+  // --- Tiered Recommendation Logic (mirrors backend) but also return daily kWh and percent-based guidance ---
+  const recommendations = [];
+  let action_required_kw = false;
 
-    if (peak_loss_kw > CRITICAL_LOSS_THRESHOLD_KW) {
-        recommendations.push(
-            `CRITICAL: Immediate action required. A severe energy loss of ${peak_loss_kw.toFixed(2)} kW is predicted, ` +
-            `likely from heavy soiling over the past ${currentConditions.days_since_cleaning} days. ` +
-            "Action: Schedule immediate professional cleaning and inspection."
-        );
-        action_required = true;
-    } else if (peak_loss_kw > HIGH_LOSS_THRESHOLD_KW) {
-        recommendations.push(
-            `High Priority: A significant energy loss of ${peak_loss_kw.toFixed(2)} kW is predicted. ` +
-            "Efficiency is likely impacted by soiling. " +
-            "Action: Schedule panel cleaning soon to restore performance."
-        );
-        action_required = true;
-    } else if (peak_loss_kw > MODERATE_LOSS_THRESHOLD_KW) {
-        recommendations.push(
-            `Moderate Priority: A noticeable energy loss of ${peak_loss_kw.toFixed(2)} kW is predicted. ` +
-            "This may be due to accumulating dust. " +
-            "Action: Plan to clean panels in the near future to prevent further loss."
-        );
-        action_required = true;
-    }
+  if (peak_loss_kw > CRITICAL_LOSS_THRESHOLD_KW) {
+    recommendations.push(
+      `CRITICAL: Immediate action required. A severe energy loss of ${peak_loss_kw.toFixed(2)} kW is predicted, ` +
+      `likely from heavy soiling over the past ${currentConditions.days_since_cleaning} days. ` +
+      "Action: Schedule immediate professional cleaning and inspection."
+    );
+    action_required_kw = true;
+  } else if (peak_loss_kw > HIGH_LOSS_THRESHOLD_KW) {
+    recommendations.push(
+      `High Priority: A significant energy loss of ${peak_loss_kw.toFixed(2)} kW is predicted. ` +
+      "Efficiency is likely impacted by soiling. " +
+      "Action: Schedule panel cleaning soon to restore performance."
+    );
+    action_required_kw = true;
+  } else if (peak_loss_kw > MODERATE_LOSS_THRESHOLD_KW) {
+    recommendations.push(
+      `Moderate Priority: A noticeable energy loss of ${peak_loss_kw.toFixed(2)} kW is predicted. ` +
+      "This may be due to accumulating dust. " +
+      "Action: Plan to clean panels in the near future to prevent further loss."
+    );
+    action_required_kw = true;
+  }
 
-    if (currentConditions.temperature_celsius > HIGH_TEMP_THRESHOLD_CELSIUS) {
-        recommendations.push(
-            `Weather Factor: High temperature (${currentConditions.temperature_celsius.toFixed(1)}°C) can reduce panel efficiency. ` +
-            "Solution: Ensure panels have adequate ventilation to dissipate heat."
-        );
-    }
+  if (currentConditions.temperature_celsius > HIGH_TEMP_THRESHOLD_CELSIUS) {
+    recommendations.push(
+      `Weather Factor: High temperature (${currentConditions.temperature_celsius.toFixed(1)}°C) can reduce panel efficiency. ` +
+      "Solution: Ensure panels have adequate ventilation to dissipate heat."
+    );
+  }
 
-    if (currentConditions.cloud_cover_percentage > HIGH_CLOUD_COVER_THRESHOLD) {
-        recommendations.push(
-            `Weather Factor: Heavy cloud cover (${currentConditions.cloud_cover_percentage}%) will limit power generation. ` +
-            "This is temporary and no action is needed."
-        );
-    }
+  if (currentConditions.cloud_cover_percentage > HIGH_CLOUD_COVER_THRESHOLD) {
+    recommendations.push(
+      `Weather Factor: Heavy cloud cover (${currentConditions.cloud_cover_percentage}%) will limit power generation. ` +
+      "This is temporary and no action is needed."
+    );
+  }
 
-    if (currentConditions.panel_age_in_days > (PANEL_AGE_THRESHOLD_YEARS * 365)) {
-        recommendations.push(
-            `Long-Term: Panels are over ${PANEL_AGE_THRESHOLD_YEARS} years old. ` +
-            "Consider a professional inspection for age-related degradation."
-        );
-    }
+  if (currentConditions.panel_age_in_days > (PANEL_AGE_THRESHOLD_YEARS * 365)) {
+    recommendations.push(
+      `Long-Term: Panels are over ${PANEL_AGE_THRESHOLD_YEARS} years old. ` +
+      "Consider a professional inspection for age-related degradation."
+    );
+  }
 
-    let final_recommendation;
-    if (recommendations.length === 0) {
-      final_recommendation = "No immediate action required. System performing within expected parameters.";
-    } else {
-      final_recommendation = recommendations.join(" ");
-    }
+  let final_recommendation;
+  if (recommendations.length === 0) {
+    final_recommendation = "No immediate action required. System performing within expected parameters.";
+  } else {
+    final_recommendation = recommendations.join(" ");
+  }
+
+  // Aggregate hourly kW losses to per-panel daily kWh (sum of each hour's kW => kWh for 1 hour slots)
+  const daily_kwh_per_panel = Math.round((hourly_losses_kw.reduce((s, v) => s + v, 0)) * 10000) / 10000;
+
+  // Determine the ideal per-panel daily kWh to compute percentage depreciation.
+  // Prefer an explicit value passed in currentConditions.ideal_daily_kwh_per_panel (kWh/day per panel).
+  // Fallback to representative ideal (0.45 kW * 24h) when not provided.
+  const representativeIdealPerPanelKw = 0.45;
+  const idealDailyPerPanelKwh = (currentConditions && currentConditions.ideal_daily_kwh_per_panel)
+    ? currentConditions.ideal_daily_kwh_per_panel
+    : representativeIdealPerPanelKw * 24;
+
+  // Total system daily loss uses provided num_panels if available
+  const numPanels = (currentConditions && currentConditions.num_panels) ? currentConditions.num_panels : 1;
+  const total_system_daily_loss_kwh = Math.round((daily_kwh_per_panel * numPanels) * 10000) / 10000;
+
+  const energy_depreciation_percentage = idealDailyPerPanelKwh > 0 ? (daily_kwh_per_panel / idealDailyPerPanelKwh) * 100 : 0;
+
+  // Also expose a percent-based action flag (align with backend thresholds)
+  const MODERATE_PCT = 5; // percent
+  const HIGH_PCT = 10; // percent
+  const CRITICAL_PCT = 20; // percent
+  let action_required_pct = false;
+  if (energy_depreciation_percentage >= CRITICAL_PCT) action_required_pct = true;
+  else if (energy_depreciation_percentage >= HIGH_PCT) action_required_pct = true;
 
     return {
       predicted_loss_kw: peak_loss_kw,
-      action_required: action_required,
+      // expose the aggregated daily kWh per panel and system
+      predicted_daily_loss_kwh_per_panel: daily_kwh_per_panel,
+      total_system_daily_loss_kwh,
+      energy_depreciation_percentage,
+      action_required: action_required_kw || action_required_pct,
       recommendation_message: final_recommendation,
+      hourly_losses_kw, // include raw hourly kW list for debugging/visualization if needed
     };
   } catch (e) {
     console.error('An error occurred during offline recommendation generation:', e);

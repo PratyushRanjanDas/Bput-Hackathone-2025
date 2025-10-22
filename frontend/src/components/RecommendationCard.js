@@ -16,6 +16,20 @@ const RecommendationCard = ({ liveData }) => {
   }
 
   const status = liveData.live_status;
+  // Preferred order for showing single-panel daily loss (kWh/d):
+  // 1) predicted_daily_loss_kwh_per_panel
+  // 2) total_system_daily_loss_kwh / num_panels
+  // 3) predicted_hourly_loss_kw * 24
+  // 4) N/A
+  const numPanels = status?.num_panels ?? null;
+  let singlePanelDaily = null;
+  if (typeof status?.predicted_daily_loss_kwh_per_panel === 'number' && status.predicted_daily_loss_kwh_per_panel > 0) {
+    singlePanelDaily = status.predicted_daily_loss_kwh_per_panel;
+  } else if (typeof status?.total_system_daily_loss_kwh === 'number' && numPanels) {
+    singlePanelDaily = status.total_system_daily_loss_kwh / numPanels;
+  } else if (typeof status?.predicted_hourly_loss_kw === 'number') {
+    singlePanelDaily = status.predicted_hourly_loss_kw * 24;
+  }
   
   // Dynamically set the card's style based on whether action is required
   const cardClassName = status.action_required 
@@ -33,12 +47,12 @@ const RecommendationCard = ({ liveData }) => {
         <p className="recommendation-message">{status.recommendation_message}</p>
         <div className="details">
           <div className="detail-item">
-            <span className="detail-label">Predicted Hourly Loss (Single Panel):</span>
-            <span className="detail-value">{status.predicted_hourly_loss_kw?.toFixed(4)} kW</span>
+            <span className="detail-label">Predicted Daily Loss (Single Panel):</span>
+            <span className="detail-value">{typeof singlePanelDaily === 'number' ? singlePanelDaily.toFixed(4) : 'N/A'} kWh/d</span>
           </div>
           <div className="detail-item">
-            <span className="detail-label">Total System Loss:</span>
-            <span className="detail-value">{status.total_system_loss_kw?.toFixed(3)} kW</span>
+            <span className="detail-label">Total System Daily Loss:</span>
+            <span className="detail-value">{typeof status.total_system_daily_loss_kwh === 'number' ? status.total_system_daily_loss_kwh.toFixed(3) : (typeof status.total_system_loss_kw === 'number' ? (status.total_system_loss_kw*24).toFixed(3) : 'N/A')} kWh/d</span>
           </div>
           <div className="detail-item">
             <span className="detail-label">Est. Daily Financial Loss:</span>

@@ -22,6 +22,18 @@
   font-size: 1.1rem;
 }
 
+.page-header { display: flex; align-items: center; gap: 1rem; }
+.mute-button {
+  background: transparent;
+  border: 1px solid rgba(0,0,0,0.08);
+  padding: 8px 12px;
+  border-radius: 8px;
+  cursor: pointer;
+  color: #333;
+  font-weight: 600;
+}
+.mute-button:hover { background: rgba(0,0,0,0.03); }
+
 .no-data-message {
   text-align: center;
   padding: 4rem 2rem;

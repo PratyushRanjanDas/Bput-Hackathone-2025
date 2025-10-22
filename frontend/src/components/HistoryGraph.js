@@ -35,8 +35,14 @@ const HistoryGraph = ({ data }) => {
     labels: data.map(item => new Date(item.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false })),
     datasets: [
       {
-        label: 'Predicted Loss (kW)',
-        data: data.map(item => item.predicted_loss_kw),
+        label: 'Predicted Loss (kWh/d)',
+        data: data.map(item => {
+          // Prefer explicit daily energy fields when available
+          if (item.predicted_loss_kwh !== undefined) return item.predicted_loss_kwh;
+          if (item.predicted_daily_loss_kwh_per_panel !== undefined) return item.predicted_daily_loss_kwh_per_panel;
+          if (item.predicted_loss_kw !== undefined) return item.predicted_loss_kw * 24; // fallback
+          return null;
+        }),
         borderColor: '#ff7300',
         backgroundColor: 'rgba(255, 115, 0, 0.2)',
         fill: false,
@@ -102,11 +108,11 @@ const HistoryGraph = ({ data }) => {
             type: 'linear',
             display: true,
             position: 'left',
-            title: {
-                display: true,
-                text: 'Predicted Loss (kW)',
-                color: '#ff7300'
-            },
+      title: {
+        display: true,
+        text: 'Predicted Loss (kWh/d)',
+        color: '#ff7300'
+      },
             ticks: { color: '#ff7300' },
             grid: { color: 'rgba(0, 0, 0, 0.1)'}
         },

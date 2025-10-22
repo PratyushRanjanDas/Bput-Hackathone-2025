@@ -124,7 +124,7 @@ function HomePage({
                         <div className="form-group">
                             <label htmlFor="idealGeneration">
                                 <span className="label-icon">🔋</span>
-                                Ideal Panel Generation (kW per panel)
+                                Ideal Panel Generation (kWh/d per panel)
                             </label>
                             <input
                                 id="idealGeneration"

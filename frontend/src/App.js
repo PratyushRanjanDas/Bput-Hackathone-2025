@@ -60,7 +60,11 @@ const computeTiltPenaltyPct = (tiltAngle, optimalTilt) => {
 // --- API Helper Functions ---
 const fetchOnlineData = async (location, panelAge, daysSinceCleaning, numPanels, idealPanelGeneration, tiltAngle) => {
   const { lat, lon } = location;
-  const queryParams = `?lat=${lat}&lon=${lon}&panel_age_in_days=${panelAge}&days_since_cleaning=${daysSinceCleaning}&num_panels=${numPanels}&ideal_panel_generation_kw=${idealPanelGeneration}&tilt_angle=${tiltAngle}`;
+  // Treat the user-entered value as kWh/day per panel (matches the form label).
+  // Convert to instantaneous kW for the backend by dividing by 24.
+  const idealPanelGenerationNum = parseFloat(idealPanelGeneration);
+  const ideal_panel_generation_kw = idealPanelGenerationNum / 24.0;
+  const queryParams = `?lat=${lat}&lon=${lon}&panel_age_in_days=${panelAge}&days_since_cleaning=${daysSinceCleaning}&num_panels=${numPanels}&ideal_panel_generation_kw=${ideal_panel_generation_kw}&tilt_angle=${tiltAngle}`;
   const response = await fetch(`${API_URL}/api/live_status${queryParams}`);
   if (!response.ok) {
     const errData = await response.json();
@@ -72,7 +76,10 @@ const fetchOnlineData = async (location, panelAge, daysSinceCleaning, numPanels,
 const fetchHistoryData = async (panelAge, daysSinceCleaning, numPanels, idealPanelGeneration, tiltAngle, location) => {
   const lat = location?.lat ?? DEFAULT_LOCATION.lat;
   const lon = location?.lon ?? DEFAULT_LOCATION.lon;
-  const queryParams = `?panel_age_in_days=${panelAge}&days_since_cleaning=${daysSinceCleaning}&num_panels=${numPanels}&ideal_panel_generation_kw=${idealPanelGeneration}&tilt_angle=${tiltAngle}&lat=${lat}&lon=${lon}`;
+  // Treat frontend input as kWh/day per panel; convert to instantaneous kW for backend calls.
+  const idealPanelGenerationNum = parseFloat(idealPanelGeneration);
+  const ideal_panel_generation_kw = idealPanelGenerationNum / 24.0;
+  const queryParams = `?panel_age_in_days=${panelAge}&days_since_cleaning=${daysSinceCleaning}&num_panels=${numPanels}&ideal_panel_generation_kw=${ideal_panel_generation_kw}&tilt_angle=${tiltAngle}&lat=${lat}&lon=${lon}`;
   const response = await fetch(`${API_URL}/api/history${queryParams}`);
   if (!response.ok) {
     throw new Error('Failed to fetch history data');
@@ -95,6 +102,8 @@ function App() {
   const [numPanels, setNumPanels] = useState('10');
   const [idealPanelGeneration, setIdealPanelGeneration] = useState('0.45');
   const [tiltAngle, setTiltAngle] = useState('25');
+  // Last clean date state (ISO date string)
+  const [lastCleanDate, setLastCleanDate] = useState(new Date().toISOString().split('T')[0]);
   
   // Offline mode parameters (weather conditions when offline)
   const [offlineTemp, setOfflineTemp] = useState(25);
@@ -115,6 +124,7 @@ function App() {
       setNumPanels(params.numPanels || '10');
       setIdealPanelGeneration(params.idealPanelGeneration || '0.45');
       setTiltAngle(params.tiltAngle || '25');
+      setLastCleanDate(params.lastCleanDate || new Date().toISOString().split('T')[0]);
     }
 
     navigator.geolocation?.getCurrentPosition(
@@ -128,6 +138,45 @@ function App() {
     );
   }, []);
 
+  // Register service worker and subscribe to push notifications (if available)
+  useEffect(() => {
+    const registerPush = async () => {
+      if (!('serviceWorker' in navigator) || !('PushManager' in window)) return;
+      try {
+        const reg = await navigator.serviceWorker.register('/sw.js');
+        // get public key from server
+        const resp = await fetch(`${API_URL}/api/vapid_public`);
+        if (!resp.ok) return;
+        const { publicKey } = await resp.json();
+        if (!publicKey) return;
+        const urlBase64ToUint8Array = (base64String) => {
+          const padding = '='.repeat((4 - base64String.length % 4) % 4);
+          const base64 = (base64String + padding).replace(/\-/g, '+').replace(/_/g, '/');
+          const rawData = window.atob(base64);
+          const outputArray = new Uint8Array(rawData.length);
+          for (let i = 0; i < rawData.length; ++i) {
+            outputArray[i] = rawData.charCodeAt(i);
+          }
+          return outputArray;
+        };
+
+        const sub = await reg.pushManager.getSubscription() || await reg.pushManager.subscribe({
+          userVisibleOnly: true,
+          applicationServerKey: urlBase64ToUint8Array(publicKey)
+        });
+
+        // send subscription to backend
+        await fetch(`${API_URL}/api/save-subscription`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(sub)
+        });
+      } catch (e) {
+        console.debug('Push registration failed:', e);
+      }
+    };
+
+    registerPush();
+  }, []);
+
   // --- Data Loading Logic ---
   const handleAnalyze = useCallback(async () => {
     setLoading(true);
@@ -138,9 +187,27 @@ function App() {
     // Assumes 0.01 mg/m^3 is 1 day and 0.5 mg/m^3 is ~30 days.
     const effectiveDaysSinceCleaning = Math.max(1, Math.round(parseFloat(dustDensity) * 60));
 
+    // Prefer explicit lastCleanDate (user input) to compute days since cleaning.
+    // If lastCleanDate is provided and valid, use the date difference (min 1 day),
+    // otherwise fall back to the dustDensity heuristic.
+    let daysFromLastClean = null;
+    if (lastCleanDate) {
+      try {
+        const last = new Date(lastCleanDate);
+        const today = new Date();
+        const diffMs = today - last;
+        const diffDays = Math.max(1, Math.round(diffMs / (1000 * 60 * 60 * 24)));
+        daysFromLastClean = diffDays;
+      } catch (err) {
+        daysFromLastClean = null;
+      }
+    }
+
     const params = { panelAge, dustDensity, numPanels, idealPanelGeneration, tiltAngle };
+    // include lastCleanDate in saved params
+    const paramsToCache = { ...params, lastCleanDate };
     const panelAgeInDays = Math.round(parseFloat(panelAge) * 365);
-    const daysClean = effectiveDaysSinceCleaning;
+    const daysClean = (typeof daysFromLastClean === 'number' && !isNaN(daysFromLastClean)) ? daysFromLastClean : effectiveDaysSinceCleaning;
     const panels = parseInt(numPanels);
     const idealGen = parseFloat(idealPanelGeneration);
 
@@ -152,9 +219,9 @@ function App() {
           fetchHistoryData(panelAgeInDays, daysClean, panels, idealGen, parseFloat(tiltAngle), location)
         ]);
         
-        setLiveData(live);
-        setHistoryData(history);
-        cacheData(live, history, params);
+  setLiveData(live);
+  setHistoryData(history);
+  cacheData(live, history, paramsToCache);
         
         // Update offline defaults from live weather data
         if (live.live_weather) {
@@ -173,58 +240,124 @@ function App() {
     
     // Offline mode
     try {
-      const currentConditions = {
-        panel_age_in_days: panelAgeInDays,
-        days_since_cleaning: daysClean,
-        temperature_celsius: offlineTemp,
-        cloud_cover_percentage: offlineCloud,
-      };
+        // Defensive handling of the ideal generation input:
+        // - If the user entered a small number (<= 3), it's likely the per-panel power rating in kW (e.g. 0.45 kW).
+        //   Convert that to kWh/day by multiplying by 24.
+        // - If the user entered a larger number (> 3), assume it's already kWh/day per panel.
+        const idealDailyPerPanelFromInput = (idealGen <= 3) ? (idealGen * 24) : idealGen;
+
+        const currentConditions = {
+          panel_age_in_days: panelAgeInDays,
+          days_since_cleaning: daysClean,
+          temperature_celsius: offlineTemp,
+          cloud_cover_percentage: offlineCloud,
+          ideal_daily_kwh_per_panel: idealDailyPerPanelFromInput, // kWh/day per panel
+          num_panels: panels,
+        };
 
       const [offlineLive, offlineHistory] = await Promise.all([
         generateOfflineRecommendation(currentConditions),
         generateOfflineHistory(panelAgeInDays, daysClean, offlineTemp, offlineCloud)
       ]);
 
-      // Calculate total system loss for offline mode
-      const singlePanelLoss = offlineLive.predicted_loss_kw || 0;
-      const totalSystemLoss = singlePanelLoss * panels;
-      const idealOutput = idealGen * panels;
+      // Use offline service's aggregated daily values when available
+      const singlePanelLossKw = offlineLive.predicted_loss_kw || 0; // instantaneous peak if needed
+      const predicted_daily_loss_kwh_per_panel = offlineLive.predicted_daily_loss_kwh_per_panel ?? Math.round(singlePanelLossKw * 24 * 10000) / 10000;
+      const total_system_daily_loss_kwh = offlineLive.total_system_daily_loss_kwh ?? Math.round((predicted_daily_loss_kwh_per_panel * panels) * 10000) / 10000;
 
-      // Tilt penalty in offline mode
+      // For percent-based depreciation, prefer the offline-provided value if present
+  // Compute or prefer offline-provided energy depreciation percentage. If we fallback to computing it,
+  // use the defensively computed idealDailyPerPanelFromInput (kWh/day per panel).
+  const idealTotalDailyKwh = idealDailyPerPanelFromInput * panels;
+  let energyDepreciation = offlineLive.energy_depreciation_percentage ?? (idealTotalDailyKwh > 0 ? (total_system_daily_loss_kwh / idealTotalDailyKwh * 100) : 0);
+
+  // Clamp percent to sensible range [0, 100]. Keep internal value for recommendation semantics.
+  energyDepreciation = Math.max(0, Math.min(100, energyDepreciation));
+
+      // Tilt penalty in offline mode (instantaneous kW approximation)
       const now = new Date();
       const month = now.getMonth() + 1;
       const optimalTilt = seasonalOptimalTilt(location.lat ?? DEFAULT_LOCATION.lat, month);
       const tiltPenaltyPct = computeTiltPenaltyPct(parseFloat(tiltAngle), optimalTilt);
-      const tiltLossKw = (tiltPenaltyPct / 100) * idealOutput;
+      const tiltLossKw = (tiltPenaltyPct / 100) * (idealGen * panels);
 
-      const combinedTotalLoss = totalSystemLoss + tiltLossKw;
-      const energyDepreciation = idealOutput > 0 ? (combinedTotalLoss / idealOutput) * 100 : 0;
+      const combinedTotalLossKw = (singlePanelLossKw * panels) + tiltLossKw;
 
-      // Format data to match online structure
+      // Build percent-based recommendation messages (use energy_depreciation_percentage as the single source of truth)
+      const MODERATE_PCT = 5; // percent
+      const HIGH_PCT = 10; // percent (notifications / action threshold)
+      const CRITICAL_PCT = 20; // percent
+
+      let action_required = false;
+      let recommendation_message = 'No immediate action required. System performing within expected parameters.';
+
+      // Note: build recommendation message after computing total_system_daily_loss_with_tilt
+
+      // Format data to match online structure (include daily kWh fields so frontend components can read them)
+      // tiltLossKw is instantaneous kW; convert tilt loss to kWh/day when computing totals
+      const tilt_loss_kwh_per_day = Math.round((tiltLossKw * 24) * 10000) / 10000;
+      let total_system_daily_loss_with_tilt = Math.round((total_system_daily_loss_kwh + tilt_loss_kwh_per_day) * 10000) / 10000;
+      // Cap displayed total daily loss at the ideal total daily production to avoid showing impossible losses
+      if (total_system_daily_loss_with_tilt > idealTotalDailyKwh) {
+        total_system_daily_loss_with_tilt = Math.round(idealTotalDailyKwh * 10000) / 10000;
+      }
+
+      // Build percent-based recommendation messages (use energy_depreciation_percentage as the single source of truth)
+      if (energyDepreciation >= CRITICAL_PCT) {
+        action_required = true;
+        recommendation_message = `CRITICAL: Immediate action required. Estimated energy depreciation is ${energyDepreciation.toFixed(1)}% (${total_system_daily_loss_with_tilt.toFixed(2)} kWh/day system loss). Schedule immediate cleaning and inspection.`;
+      } else if (energyDepreciation >= HIGH_PCT) {
+        action_required = true;
+        recommendation_message = `High Priority: Estimated energy depreciation is ${energyDepreciation.toFixed(1)}% (${total_system_daily_loss_with_tilt.toFixed(2)} kWh/day system loss). Consider scheduling panel cleaning soon.`;
+      } else if (energyDepreciation >= MODERATE_PCT) {
+        recommendation_message = `Moderate Priority: Estimated energy depreciation is ${energyDepreciation.toFixed(1)}% (${total_system_daily_loss_with_tilt.toFixed(2)} kWh/day system loss). Plan to clean panels in the near future.`;
+      }
+
+      // Debug logs to help trace why values are zero in UI
+      try {
+        console.debug('offlineLive (raw):', offlineLive);
+        console.debug('computed: singlePanelLossKw=', singlePanelLossKw, 'predicted_daily_loss_kwh_per_panel=', predicted_daily_loss_kwh_per_panel, 'total_system_daily_loss_kwh=', total_system_daily_loss_kwh, 'tilt_loss_kwh_per_day=', tilt_loss_kwh_per_day, 'total_with_tilt=', total_system_daily_loss_with_tilt, 'idealTotalDailyKwh=', idealTotalDailyKwh, 'energyDepreciation=', energyDepreciation);
+      } catch (e) {}
+
       const offlineLiveData = {
         live_status: {
-          predicted_hourly_loss_kw: singlePanelLoss,
-          total_system_loss_kw: combinedTotalLoss,
-          action_required: offlineLive.action_required,
-          recommendation_message: offlineLive.recommendation_message,
-          estimated_daily_financial_loss: combinedTotalLoss * 24 * 8, // Assuming ₹8/kWh
+          predicted_hourly_loss_kw: singlePanelLossKw,
+          predicted_daily_loss_kwh_per_panel: predicted_daily_loss_kwh_per_panel,
+          total_system_daily_loss_kwh: total_system_daily_loss_with_tilt,
+          total_system_loss_kw: combinedTotalLossKw,
+          action_required: action_required,
+          recommendation_message: recommendation_message,
+          estimated_daily_financial_loss: total_system_daily_loss_with_tilt * 8, // Assuming ₹8/kWh
           energy_depreciation_percentage: energyDepreciation,
           dust_level_days: daysClean,
           tilt_angle_deg: parseFloat(tiltAngle),
           optimal_tilt_angle_deg: Math.round(optimalTilt * 10) / 10,
           tilt_penalty_percentage: Math.round(tiltPenaltyPct * 100) / 100,
           tilt_loss_kw: Math.round(tiltLossKw * 10000) / 10000,
+          tilt_loss_kwh_per_day: tilt_loss_kwh_per_day,
         },
         live_weather: {
           temperature_celsius: offlineTemp,
           cloud_cover_percentage: offlineCloud,
           cloud_cover: offlineCloud,
-          uv_index: 0, // Not available in offline mode
+          // Simple diurnal UV index estimate for offline mode: peaks at ~noon, zero at night
+          uv_index: (() => {
+            try {
+              const h = new Date().getHours();
+              if (h < 6 || h > 18) return 0.0;
+              return Math.max(0, 8 * Math.cos((h - 13) * (Math.PI / 12)));
+            } catch (e) {
+              return 0.0;
+            }
+          })(),
         }
       };
+
       setLiveData(offlineLiveData);
       setHistoryData(offlineHistory);
       cacheData(offlineLiveData, offlineHistory, params);
+      // ensure lastCleanDate is also saved for offline path
+      cacheData(offlineLiveData, offlineHistory, paramsToCache);
     } catch (e) {
       console.error("Offline mode failed:", e);
       setError(`Offline analysis failed: ${e.message}`);
@@ -288,6 +421,8 @@ function App() {
                 setIdealPanelGeneration={setIdealPanelGeneration}
                 tiltAngle={tiltAngle}
                 setTiltAngle={setTiltAngle}
+                lastCleanDate={lastCleanDate}
+                setLastCleanDate={setLastCleanDate}
                 onAnalyze={handleAnalyze}
                 isLoading={loading}
                 error={error}

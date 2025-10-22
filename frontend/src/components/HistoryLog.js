@@ -26,7 +26,7 @@ function HistoryLog({ historyData }) {
                             <th>Temperature (°C)</th>
                             <th>Cloud Cover (%)</th>
                             <th>UV Index</th>
-                            <th>Predicted Loss (kW)</th>
+                            <th>Predicted Loss (kWh/d)</th>
                         </tr>
                     </thead>
                     <tbody>
@@ -48,7 +48,7 @@ function HistoryLog({ historyData }) {
                                     <td>{entry.temperature_celsius !== undefined ? entry.temperature_celsius.toFixed(1) + '°C' : 'N/A'}</td>
                                     <td>{(entry.cloud_cover_percentage !== undefined ? entry.cloud_cover_percentage : entry.cloud_cover !== undefined ? entry.cloud_cover : 'N/A')}{entry.cloud_cover_percentage !== undefined || entry.cloud_cover !== undefined ? '%' : ''}</td>
                                     <td>{entry.uv_index !== undefined ? entry.uv_index.toFixed(1) : 'N/A'}</td>
-                                    <td>{entry.predicted_loss_kw !== undefined ? entry.predicted_loss_kw.toFixed(4) + ' kW' : 'N/A'}</td>
+                                    <td>{entry.predicted_loss_kwh !== undefined ? entry.predicted_loss_kwh.toFixed(4) + ' kWh/d' : (entry.predicted_loss_kw !== undefined ? (entry.predicted_loss_kw*24).toFixed(4) + ' kWh/d' : 'N/A')}</td>
                                 </tr>
                             );
                         })}

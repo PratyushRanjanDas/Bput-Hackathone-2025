@@ -13,6 +13,22 @@ const StatusPanel = ({ liveData }) => {
 
   const weather = liveData.live_weather;
   const status = liveData.live_status;
+  const numPanels = liveData.num_panels ?? status.num_panels ?? null;
+  // Preferred order for showing single-panel daily loss (kWh/d):
+  // 1) predicted_daily_loss_kwh_per_panel
+  // 2) total_system_daily_loss_kwh / num_panels
+  // 3) predicted_hourly_loss_kw * 24
+  // 4) N/A
+  let perPanelDailyLoss = null;
+  // Prefer explicit per-panel daily prediction when it's a positive number.
+  if (typeof status?.predicted_daily_loss_kwh_per_panel === 'number' && status.predicted_daily_loss_kwh_per_panel > 0) {
+    perPanelDailyLoss = status.predicted_daily_loss_kwh_per_panel;
+  } else if (typeof status?.total_system_daily_loss_kwh === 'number' && numPanels) {
+    // Fall back to dividing total system daily loss by number of panels when per-panel prediction is missing or zero.
+    perPanelDailyLoss = status.total_system_daily_loss_kwh / numPanels;
+  } else if (typeof status?.predicted_hourly_loss_kw === 'number') {
+    perPanelDailyLoss = status.predicted_hourly_loss_kw * 24;
+  }
 
   return (
     <div className="status-panel">
@@ -28,12 +44,12 @@ const StatusPanel = ({ liveData }) => {
         </div>
         <div className="weather-item">
           <span className="weather-label">UV Index</span>
-          <span className="weather-value">{weather.uv_index?.toFixed(1)}</span>
+          <span className="weather-value">{weather.uv_index !== undefined ? weather.uv_index?.toFixed(1) : 'N/A'}</span>
         </div>
         <div className="weather-item">
           <span className="weather-label">Energy Depreciation</span>
           <span className="weather-value depreciation">
-            {status.energy_depreciation_percentage?.toFixed(2)} %
+            {typeof status.energy_depreciation_percentage === 'number' ? status.energy_depreciation_percentage.toFixed(2) : 'N/A'} %
           </span>
         </div>
         <div className="weather-item">
@@ -42,7 +58,11 @@ const StatusPanel = ({ liveData }) => {
         </div>
         <div className="weather-item">
           <span className="weather-label">Total System Loss</span>
-          <span className="weather-value loss">{status.total_system_loss_kw?.toFixed(3)} kW</span>
+          <span className="weather-value loss">{typeof status.total_system_daily_loss_kwh === 'number' ? status.total_system_daily_loss_kwh.toFixed(3) : (typeof status.total_system_loss_kw === 'number' ? (status.total_system_loss_kw*24).toFixed(3) : 'N/A')} kWh/d</span>
+        </div>
+        <div className="weather-item">
+          <span className="weather-label">Predicted Daily Loss (per panel)</span>
+          <span className="weather-value">{typeof perPanelDailyLoss === 'number' ? perPanelDailyLoss.toFixed(4) + ' kWh/d' : 'N/A'}</span>
         </div>
         {status?.tilt_angle_deg !== undefined && (
           <div className="weather-item">
@@ -53,7 +73,7 @@ const StatusPanel = ({ liveData }) => {
         {status?.tilt_penalty_percentage !== undefined && (
           <div className="weather-item">
             <span className="weather-label">Tilt Penalty</span>
-            <span className="weather-value">{status.tilt_penalty_percentage}% ({status.tilt_loss_kw} kW)</span>
+            <span className="weather-value">{status.tilt_penalty_percentage}% ({typeof status.tilt_loss_kw === 'number' ? ( (status.tilt_loss_kw*24).toFixed(3) + ' kWh/d' ) : 'N/A'})</span>
           </div>
         )}
       </div>

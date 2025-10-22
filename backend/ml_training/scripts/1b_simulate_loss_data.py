@@ -21,31 +21,55 @@ def simulate_loss_data(num_records=8760*2, output_path='../../data/historical_lo
     cloud_cover_percentage = np.random.uniform(0, 100, num_records)
     panel_angle_degrees = 35 # Fixed optimal angle for simplicity
 
-    # Ideal Power Calculation
-    base_power = 10 * np.sin(np.pi * hour_of_day / 24) * (1 - cloud_cover_percentage / 120)
-    temp_factor = 1 - 0.005 * np.maximum(0, temperature_celsius - 25)
-    ideal_power_kw = np.maximum(0, base_power * temp_factor)
+    # --- Improved ideal power / irradiance model ---
+    # seasonal amplitude: peak in mid-year (northern hemisphere)
+    seasonal_amp = 1 + 0.25 * np.sin(2 * np.pi * (day_of_year - 172) / 365.0)
+    # solar elevation-like daily shape: zero at night, peak near noon
+    sun_angle = np.maximum(0, np.sin(np.pi * (hour_of_day - 6) / 12.0))
+    # base clear-sky irradiance proxy (kW per nominal array) scaled by seasonal amp
+    clear_irradiance = 5.0 * sun_angle * seasonal_amp
+    # cloud attenuation (cloud_cover_percentage in [0,100]) - stronger effect
+    cloud_atten = np.clip(1 - (cloud_cover_percentage / 120.0), 0.0, 1.0)
+    temp_factor = 1 - 0.004 * np.maximum(0, temperature_celsius - 25)
+    ideal_power_kw = np.maximum(0, clear_irradiance * cloud_atten * temp_factor)
 
     # --- Introduce Factors Causing Loss ---
-    
-    # 1. Soiling (Dirt on Panels)
-    # Simulates dirt accumulating over time, then being reset by "cleaning" (rain)
+    # 1. Soiling (Dirt on Panels) with rain-linked cleaning events and persistence
     days_since_cleaning = np.zeros(num_records)
+
+    # Create a correlated cloud process (AR(1)-like) to simulate storm persistence
+    cloud = np.zeros(num_records)
+    cloud[0] = np.random.beta(2, 5) * 100
     for i in range(1, num_records):
-        # 1% chance of rain/cleaning each hour
-        if np.random.rand() < 0.01:
+        shock = np.random.beta(2, 5) * 100
+        cloud[i] = np.clip(0.8 * cloud[i-1] + 0.2 * shock, 0, 100)
+    cloud_cover_percentage = cloud
+
+    # Rain events: more likely during high cloud periods, create multi-hour rain spells
+    is_raining = np.zeros(num_records, dtype=bool)
+    i = 0
+    while i < num_records:
+        if cloud_cover_percentage[i] > 60 and np.random.rand() < 0.06:
+            length = np.random.randint(3, 24)  # rain lasting 3-24 hours
+            is_raining[i:min(num_records, i+length)] = True
+            i += length
+        else:
+            i += 1
+
+    # Accumulate days since cleaning; reset to 0 when it rains (cleaning event)
+    for i in range(1, num_records):
+        if is_raining[i]:
             days_since_cleaning[i] = 0
         else:
-            # Add an hour's worth of days
             days_since_cleaning[i] = days_since_cleaning[i-1] + 1/24.0
-    
-    # Soiling Loss: Efficiency drops by 0.3% for each day without cleaning, max 20% loss
-    soiling_loss_factor = 1 - np.minimum(0.20, days_since_cleaning * 0.003)
+
+    # Soiling Loss: efficiency drop per day (adjustable), capped at 25%
+    daily_soiling_pct = 0.0025  # 0.25% per day (tunable)
+    soiling_loss_factor = 1 - np.minimum(0.25, days_since_cleaning * daily_soiling_pct)
 
     # 2. Degradation (Aging of Panels)
-    # Panel loses a small amount of efficiency each day. 0.5% per year.
     panel_age_in_days = (timestamps - timestamps[0]).days
-    degradation_loss_factor = 1 - (panel_age_in_days / 365 * 0.005)
+    degradation_loss_factor = 1 - (panel_age_in_days / 365.0 * 0.005)
 
     # --- Calculate Actual Power and Energy Loss ---
     actual_power_kw = ideal_power_kw * soiling_loss_factor * degradation_loss_factor
