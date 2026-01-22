@@ -1,0 +1,21 @@
+title: Solar Panel Optimizer
+description: A full-stack web application to monitor and optimize solar panel performance using real-time weather, AI-powered loss prediction, and actionable recommendations.
+theme: jekyll-theme-minimal
+baseurl: "/Bput-Hackathone-2025"
+url: "https://pratyushranjandas.github.io"
+
+# Build settings
+markdown: kramdown
+plugins:
+  - jekyll-seo-tag
+
+# Navigation
+navigation:
+  - title: Home
+    url: /
+  - title: Features
+    url: /#features
+  - title: Tech Stack
+    url: /#tech-stack
+  - title: Demo
+    url: /#demo
